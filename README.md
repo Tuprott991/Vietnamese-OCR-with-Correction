@@ -4,7 +4,7 @@
 
 This project combines state-of-the-art OCR frameworks with AI-powered text correction to deliver highly accurate Vietnamese text extraction from images. The system integrates PaddleOCR for text detection, VietOCR for recognition, and a Transformer-based model for post-processing text correction.
 
-## ✨ Features
+## Features
 
 -  **Text Detection**: Advanced text localization using PaddleOCR's DB algorithm
 -  **Text Recognition**: High-accuracy Vietnamese text recognition with VietOCR
@@ -92,7 +92,7 @@ XE 3 BÁNH VÀ 4 BANH
 - XE 3 BÁNH VÀ 4 BÁNH.
 ```
 
-## 🔧 Configuration
+## Configuration
 
 ### Device Selection
 - `--device auto`: Automatically detect and use GPU if available
@@ -105,7 +105,7 @@ The system uses pre-trained models:
 - **Recognition**: VietOCR VGG-Transformer
 - **Correction**: `bmd1905/vietnamese-correction-v2`
 
-## 📚 References
+## References
 
 - [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) - Text detection framework
 - [VietOCR](https://github.com/pbcquoc/vietocr) - Vietnamese text recognition
