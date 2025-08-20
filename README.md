@@ -45,7 +45,7 @@ This project combines state-of-the-art OCR frameworks with AI-powered text corre
 
 1. **Clone the repository**
 ```bash
-git clone https://github.com/bmd1905/vietnamese-ocr
+git clone https://github.com/Tuprott991/Vietnamese-OCR-with-Correction
 ```
 
 2. **Create and activate conda environment**
