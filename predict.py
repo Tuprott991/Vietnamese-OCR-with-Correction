@@ -35,7 +35,7 @@ from transformers import pipeline
 
 corrector = pipeline("text2text-generation", model="bmd1905/vietnamese-correction-v2")
 
-MAX_LENGTH = 512
+MAX_LENGTH = 256
 
 
 def predict(recognitor, detector, img_path, padding=4):
