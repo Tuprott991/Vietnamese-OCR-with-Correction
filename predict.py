@@ -15,6 +15,12 @@ import argparse
 
 import torch
 
+import warnings
+
+warnings.filterwarnings("ignore")
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 from vietocr.vietocr.tool.predictor import Predictor
 from vietocr.vietocr.tool.config import Cfg
 
