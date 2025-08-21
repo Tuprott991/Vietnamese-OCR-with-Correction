@@ -1,8 +1,10 @@
 # Vietnamese OCR with Text Correction
 
-🇻🇳 **Vietnamese OCR with intelligent text correction capabilities**
+**Vietnamese OCR with intelligent text correction capabilities**
 
 This project combines state-of-the-art OCR frameworks with AI-powered text correction to deliver highly accurate Vietnamese text extraction from images. The system integrates PaddleOCR for text detection, VietOCR for recognition, and a Transformer-based model for post-processing text correction.
+
+![gradio_view](gradio_view.png)
 
 ## Features
 
