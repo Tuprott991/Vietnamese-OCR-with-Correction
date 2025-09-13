@@ -11,6 +11,7 @@ from pathlib import Path
 import time
 from concurrent.futures import ThreadPoolExecutor
 import multiprocessing
+import threading
 
 import torch
 
@@ -183,38 +184,44 @@ def predict_batch_sequential(recognitor, detector, image_paths, padding=4):
     return results
 
 
-def load_and_detect_image(args):
-    """Helper function for parallel image loading and detection"""
-    img_path, detector, padding = args
+def load_image_only(img_path):
+    """Helper function for parallel image loading only (safe)"""
     try:
-        # Load image (CPU bottleneck #1)
         start_time = time.time()
         img = cv2.imread(img_path)
         load_time = time.time() - start_time
         
         if img is None:
-            return None, f"Could not load image {img_path}", load_time, 0
+            return None, f"Could not load image {img_path}", load_time
         
-        # Text detection (CPU bottleneck #2)
+        return (img, img_path), None, load_time
+        
+    except Exception as e:
+        return None, f"Error loading {img_path}: {e}", 0
+
+
+def detect_image_sequential(detector, img, img_path):
+    """Sequential detection function - thread safe"""
+    try:
         detect_start = time.time()
         result = detector.ocr(img_path, cls=False, det=True, rec=False)
         detect_time = time.time() - detect_start
         
         if not result or not result[0]:
-            return None, f"No text detected in {img_path}", load_time, detect_time
+            return None, f"No text detected in {img_path}", detect_time
             
         result = result[0]
         
-        # Filter Boxes (CPU bottleneck #3)
+        # Filter Boxes
         boxes = []
         for line in result:
             boxes.append([[int(line[0][0]), int(line[0][1])], [int(line[2][0]), int(line[2][1])]])
         boxes = boxes[::-1]
         
-        return (img, img_path, boxes), None, load_time, detect_time
+        return boxes, None, detect_time
         
     except Exception as e:
-        return None, f"Error processing {img_path}: {e}", 0, 0
+        return None, f"Error detecting {img_path}: {e}", 0
 
 
 def predict_batch_true(recognitor, detector, image_paths, recognition_batch_size=8, padding=4, use_parallel_io=True):
@@ -234,42 +241,64 @@ def predict_batch_true(recognitor, detector, image_paths, recognition_batch_size
     all_boxes = []
     
     if use_parallel_io and len(image_paths) > 2:
-        # Parallel I/O processing to reduce CPU bottleneck
-        max_workers = min(4, multiprocessing.cpu_count()//2)  # Don't over-parallelize
-        print(f"📈 Using {max_workers} parallel workers for I/O operations")
+        # Parallel I/O processing (only for loading images - safer)
+        max_workers = min(4, multiprocessing.cpu_count()//2)
+        print(f"📈 Using {max_workers} parallel workers for image loading")
         
+        # Step 1: Parallel image loading
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            detection_args = [(path, detector, padding) for path in image_paths]
-            detection_results = list(executor.map(load_and_detect_image, detection_args))
+            load_results = list(executor.map(load_image_only, image_paths))
         
-        for result_data, error, load_time, detect_time in detection_results:
+        # Step 2: Sequential detection (PaddleOCR is not thread-safe)
+        for i, (load_result, load_error, load_time) in enumerate(load_results):
             total_load_time += load_time
+            
+            if load_result is None:
+                if load_error:
+                    print(f"Warning: {load_error}")
+                results[os.path.basename(image_paths[i])] = []
+                continue
+            
+            img, img_path = load_result
+            
+            # Sequential detection to avoid segfaults
+            boxes, detect_error, detect_time = detect_image_sequential(detector, img, img_path)
             total_detect_time += detect_time
             
-            if result_data is None:
-                if error:
-                    print(f"Warning: {error}")
-                    results[os.path.basename(image_paths[len(batch_images)])] = []
+            if boxes is None:
+                if detect_error:
+                    print(f"Warning: {detect_error}")
+                results[os.path.basename(img_path)] = []
                 continue
-                
-            img, img_path, boxes = result_data
+            
             batch_images.append(img)
             valid_paths.append(img_path)
             all_boxes.append(boxes)
     else:
-        # Sequential processing (original method)
+        # Sequential processing (safest method)
         for img_path in image_paths:
-            result_data, error, load_time, detect_time = load_and_detect_image((img_path, detector, padding))
+            # Load image
+            load_result, load_error, load_time = load_image_only(img_path)
             total_load_time += load_time
-            total_detect_time += detect_time
             
-            if result_data is None:
-                if error:
-                    print(f"Warning: {error}")
+            if load_result is None:
+                if load_error:
+                    print(f"Warning: {load_error}")
                 results[os.path.basename(img_path)] = []
                 continue
-                
-            img, img_path, boxes = result_data
+            
+            img, img_path = load_result
+            
+            # Sequential detection
+            boxes, detect_error, detect_time = detect_image_sequential(detector, img, img_path)
+            total_detect_time += detect_time
+            
+            if boxes is None:
+                if detect_error:
+                    print(f"Warning: {detect_error}")
+                results[os.path.basename(img_path)] = []
+                continue
+            
             batch_images.append(img)
             valid_paths.append(img_path)
             all_boxes.append(boxes)
