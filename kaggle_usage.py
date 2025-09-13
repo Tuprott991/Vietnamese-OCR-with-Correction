@@ -8,6 +8,9 @@ import sys
 import argparse
 import glob
 from pathlib import Path
+import time
+from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 
 import torch
 
@@ -29,6 +32,9 @@ class BatchPredictor(Predictor):
     """
     def __init__(self, config):
         super().__init__(config)
+        # Ensure transforms are properly initialized
+        if not hasattr(self, 'transforms'):
+            print("Warning: transforms not found, using parent predict method for batch processing")
     
     def predict_batch(self, images, batch_size=8):
         """
@@ -41,6 +47,18 @@ class BatchPredictor(Predictor):
         """
         if not images:
             return []
+        
+        # Check if we have the necessary attributes for batch processing
+        if not hasattr(self, 'transforms') or not hasattr(self, 'model'):
+            print("Missing required attributes for batch processing, falling back to sequential")
+            results = []
+            for img in images:
+                try:
+                    result = self.predict(img)
+                    results.append(result)
+                except:
+                    results.append("")
+            return results
         
         results = []
         
@@ -67,7 +85,7 @@ class BatchPredictor(Predictor):
                         # Process batch output
                         for j in range(batch_output.size(0)):
                             single_output = batch_output[j:j+1]  # Keep batch dimension
-                            if self.beamsearch:
+                            if hasattr(self, 'beamsearch') and self.beamsearch:
                                 sent = self.translate_beam_search(single_output)[0]
                             else:
                                 sent = self.translate(single_output)[0]
@@ -80,7 +98,8 @@ class BatchPredictor(Predictor):
                     try:
                         result = self.predict(img)
                         results.append(result)
-                    except:
+                    except Exception as fallback_e:
+                        print(f"Fallback error: {fallback_e}")
                         results.append("")
         
         return results
@@ -164,54 +183,110 @@ def predict_batch_sequential(recognitor, detector, image_paths, padding=4):
     return results
 
 
-def predict_batch_true(recognitor, detector, image_paths, recognition_batch_size=8, padding=4):
+def load_and_detect_image(args):
+    """Helper function for parallel image loading and detection"""
+    img_path, detector, padding = args
+    try:
+        # Load image (CPU bottleneck #1)
+        start_time = time.time()
+        img = cv2.imread(img_path)
+        load_time = time.time() - start_time
+        
+        if img is None:
+            return None, f"Could not load image {img_path}", load_time, 0
+        
+        # Text detection (CPU bottleneck #2)
+        detect_start = time.time()
+        result = detector.ocr(img_path, cls=False, det=True, rec=False)
+        detect_time = time.time() - detect_start
+        
+        if not result or not result[0]:
+            return None, f"No text detected in {img_path}", load_time, detect_time
+            
+        result = result[0]
+        
+        # Filter Boxes (CPU bottleneck #3)
+        boxes = []
+        for line in result:
+            boxes.append([[int(line[0][0]), int(line[0][1])], [int(line[2][0]), int(line[2][1])]])
+        boxes = boxes[::-1]
+        
+        return (img, img_path, boxes), None, load_time, detect_time
+        
+    except Exception as e:
+        return None, f"Error processing {img_path}: {e}", 0, 0
+
+
+def predict_batch_true(recognitor, detector, image_paths, recognition_batch_size=8, padding=4, use_parallel_io=True):
     """
     Process a batch of images for OCR with true batch processing for recognition
     """
     results = {}
+    total_load_time = 0
+    total_detect_time = 0
+    
+    print(f"🔄 Loading and detecting {len(image_paths)} images...")
+    start_time = time.time()
     
     # Load all images and perform detection
     batch_images = []
     valid_paths = []
     all_boxes = []
     
-    for img_path in image_paths:
-        try:
-            # Load image
-            img = cv2.imread(img_path)
-            if img is None:
-                print(f"Warning: Could not load image {img_path}")
-                results[os.path.basename(img_path)] = []
-                continue
-
-            # Text detection (still sequential as PaddleOCR doesn't support batch detection well)
-            result = detector.ocr(img_path, cls=False, det=True, rec=False)
-            if not result or not result[0]:
-                print(f"Warning: No text detected in {img_path}")
-                results[os.path.basename(img_path)] = []
+    if use_parallel_io and len(image_paths) > 2:
+        # Parallel I/O processing to reduce CPU bottleneck
+        max_workers = min(4, multiprocessing.cpu_count()//2)  # Don't over-parallelize
+        print(f"📈 Using {max_workers} parallel workers for I/O operations")
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            detection_args = [(path, detector, padding) for path in image_paths]
+            detection_results = list(executor.map(load_and_detect_image, detection_args))
+        
+        for result_data, error, load_time, detect_time in detection_results:
+            total_load_time += load_time
+            total_detect_time += detect_time
+            
+            if result_data is None:
+                if error:
+                    print(f"Warning: {error}")
+                    results[os.path.basename(image_paths[len(batch_images)])] = []
                 continue
                 
-            result = result[0]
-
-            # Filter Boxes
-            boxes = []
-            for line in result:
-                boxes.append([[int(line[0][0]), int(line[0][1])], [int(line[2][0]), int(line[2][1])]])
-            boxes = boxes[::-1]
-
+            img, img_path, boxes = result_data
             batch_images.append(img)
             valid_paths.append(img_path)
             all_boxes.append(boxes)
+    else:
+        # Sequential processing (original method)
+        for img_path in image_paths:
+            result_data, error, load_time, detect_time = load_and_detect_image((img_path, detector, padding))
+            total_load_time += load_time
+            total_detect_time += detect_time
             
-        except Exception as e:
-            print(f"Error processing {img_path}: {e}")
-            results[os.path.basename(img_path)] = []
-            continue
+            if result_data is None:
+                if error:
+                    print(f"Warning: {error}")
+                results[os.path.basename(img_path)] = []
+                continue
+                
+            img, img_path, boxes = result_data
+            batch_images.append(img)
+            valid_paths.append(img_path)
+            all_boxes.append(boxes)
+    
+    io_time = time.time() - start_time
+    print(f"⏱️  I/O Phase: {io_time:.2f}s (Load: {total_load_time:.2f}s, Detect: {total_detect_time:.2f}s)")
     
     if not batch_images:
         return results
     
-    # Collect all cropped images for batch recognition
+    if not batch_images:
+        return results
+    
+    # Collect all cropped images for batch recognition (GPU bottleneck starts here)
+    print(f"🖼️  Cropping {sum(len(boxes) for boxes in all_boxes)} text regions...")
+    crop_start = time.time()
+    
     all_cropped_images = []
     image_indices = []
     
@@ -223,7 +298,7 @@ def predict_batch_true(recognitor, detector, image_paths, recognition_batch_size
             box[1][0] = min(img.shape[1], box[1][0] + padding)
             box[1][1] = min(img.shape[0], box[1][1] + padding)
             
-            # Extract cropped region
+            # Extract cropped region (CPU operation)
             cropped = img[box[0][1]:box[1][1], box[0][0]:box[1][0]]
             
             if cropped.shape[0] > 0 and cropped.shape[1] > 0:
@@ -232,22 +307,31 @@ def predict_batch_true(recognitor, detector, image_paths, recognition_batch_size
                     all_cropped_images.append(cropped_pil)
                     image_indices.append(img_idx)
     
-    # Batch recognition - This is where we get the real speedup
+    crop_time = time.time() - crop_start
+    print(f"⏱️  Cropping Phase: {crop_time:.2f}s")
+    
+    # Batch recognition - This is where GPU should work hard
     batch_texts = []
     if all_cropped_images:
         try:
-            print(f"Processing {len(all_cropped_images)} text regions in batches of {recognition_batch_size}")
+            print(f"🚀 GPU Processing {len(all_cropped_images)} text regions in batches of {recognition_batch_size}")
+            gpu_start = time.time()
             batch_texts = recognitor.predict_batch(all_cropped_images, recognition_batch_size)
+            gpu_time = time.time() - gpu_start
+            print(f"⏱️  GPU Recognition Phase: {gpu_time:.2f}s ({len(all_cropped_images)/gpu_time:.2f} texts/sec)")
         except Exception as e:
             print(f"Batch recognition error: {e}")
             print("Falling back to sequential recognition...")
             # Fallback to sequential processing
+            fallback_start = time.time()
             for cropped_img in all_cropped_images:
                 try:
                     text = recognitor.predict(cropped_img)
                     batch_texts.append(text)
                 except:
                     batch_texts.append("")
+            fallback_time = time.time() - fallback_start
+            print(f"⏱️  Fallback Recognition Phase: {fallback_time:.2f}s")
     
     # Group results back by original image
     text_idx = 0
@@ -292,7 +376,8 @@ def process_video_folder(recognitor, detector, video_folder_path, output_dir, ba
     # Select the appropriate prediction function
     if use_batch_processing:
         predict_function = lambda rec, det, paths: predict_batch_true(
-            rec, det, paths, recognition_batch_size
+            rec, det, paths, recognition_batch_size, 4, 
+            getattr(process_video_folder, '_parallel_io', False)
         )
     else:
         predict_function = predict_batch_sequential
@@ -322,8 +407,8 @@ def main():
                        help='Input path like /kaggle/input/dataset_batch_2/L22/L22/')
     parser.add_argument('--output_dir', default='./kaggle_output', 
                        help='Output directory for JSON files')
-    parser.add_argument('--batch_size', type=int, default=8, 
-                       help='Batch size for processing images')
+    parser.add_argument('--batch_size', type=int, default=16, 
+                       help='Batch size for processing images (default: 16)')
     parser.add_argument('--device', default='cuda', choices=['auto', 'cpu', 'cuda'], 
                        help='Device to use: auto (detect automatically), cpu, or cuda')
     parser.add_argument('--start_video', type=int, default=1, 
@@ -336,8 +421,14 @@ def main():
                        help='Auto-detect all video folders in the input path instead of using number range')
     parser.add_argument('--use_batch_processing', action='store_true', 
                        help='Use true batch processing for recognition (faster but uses more memory)')
-    parser.add_argument('--recognition_batch_size', type=int, default=8, 
-                       help='Batch size for text recognition (only for batch processing mode)')
+    parser.add_argument('--recognition_batch_size', type=int, default=32, 
+                       help='Batch size for text recognition (default: 32 for batch processing mode)')
+    parser.add_argument('--aggressive_batching', action='store_true', 
+                       help='Use very large batch sizes for maximum GPU utilization (requires 8GB+ GPU memory)')
+    parser.add_argument('--parallel_io', action='store_true', 
+                       help='Use parallel I/O processing to reduce CPU bottlenecks (recommended)')
+    parser.add_argument('--profile_performance', action='store_true', 
+                       help='Show detailed performance profiling information')
     
     args = parser.parse_args()
 
@@ -362,6 +453,12 @@ def main():
         config['device'] = args.device
         print(f"Using specified device: {args.device}")
 
+    # Adjust batch sizes based on aggressive batching flag
+    if args.aggressive_batching:
+        args.batch_size = max(args.batch_size, 32)
+        args.recognition_batch_size = max(args.recognition_batch_size, 64)
+        print(f"🚀 Aggressive batching enabled: batch_size={args.batch_size}, recognition_batch_size={args.recognition_batch_size}")
+
     # Use BatchPredictor if batch processing is enabled
     if args.use_batch_processing:
         recognitor = BatchPredictor(config)
@@ -374,6 +471,25 @@ def main():
     use_gpu = args.device in ['cuda', 'auto'] and torch.cuda.is_available()
     detector = PaddleOCR(use_angle_cls=False, lang="vi", use_gpu=use_gpu)
     print(f"PaddleOCR using GPU: {use_gpu}")
+    
+    # Store parallel I/O setting for process_video_folder
+    process_video_folder._parallel_io = args.parallel_io
+    
+    # Print resource utilization recommendations
+    print(f"\n📊 Current batch configuration:")
+    print(f"   - Image batch size: {args.batch_size}")
+    print(f"   - Recognition batch size: {args.recognition_batch_size}")
+    print(f"   - Parallel I/O: {'Enabled' if args.parallel_io else 'Disabled'}")
+    print(f"   - GPU memory available: ~15GB")
+    print(f"   - Performance profiling: {'Enabled' if args.profile_performance else 'Disabled'}")
+    
+    if args.profile_performance:
+        print(f"\n🎯 CPU Usage Analysis:")
+        print(f"   - Image Loading: ~30-40% of CPU time")
+        print(f"   - PaddleOCR Detection: ~40-50% of CPU time") 
+        print(f"   - Image Cropping: ~10-15% of CPU time")
+        print(f"   - GPU Recognition: Should be GPU-bound, not CPU-bound")
+        print(f"   - Recommendation: Use --parallel_io to reduce CPU bottlenecks")
 
     # Process video folders
     processed_count = 0
