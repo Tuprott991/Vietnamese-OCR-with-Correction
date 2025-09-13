@@ -537,8 +537,8 @@ def main():
 
     # Adjust batch sizes based on aggressive batching flag
     if args.aggressive_batching:
-        args.batch_size = max(args.batch_size, 32)
-        args.recognition_batch_size = max(args.recognition_batch_size, 64)
+        args.batch_size = max(args.batch_size, 64)
+        args.recognition_batch_size = max(args.recognition_batch_size, 128)
         print(f"🚀 Aggressive batching enabled: batch_size={args.batch_size}, recognition_batch_size={args.recognition_batch_size}")
 
     # Use BatchPredictor if batch processing is enabled
