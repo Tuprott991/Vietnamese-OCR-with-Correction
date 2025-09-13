@@ -295,8 +295,18 @@ def predict_batch_true(recognitor, detector, image_paths, recognition_batch_size
     
     if use_parallel_io and len(image_paths) > 2:
         # Parallel I/O processing (only for loading images - safer)
-        max_workers = min(4, multiprocessing.cpu_count()//2)
-        print(f"📈 Using {max_workers} parallel workers for image loading")
+        # Get max_workers from the stored attribute
+        max_workers_setting = getattr(process_video_folder, '_max_workers', 0)
+        
+        if max_workers_setting == 0:
+            # Auto-detect optimal worker count
+            cpu_count = multiprocessing.cpu_count()
+            # For Kaggle/high-performance systems, use more workers
+            max_workers = min(12, max(4, cpu_count - 2))  # Leave 2 CPUs for other tasks
+        else:
+            max_workers = max_workers_setting
+            
+        print(f"📈 Using {max_workers} parallel workers for image loading (CPU cores: {multiprocessing.cpu_count()})")
         
         # Step 1: Parallel image loading
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -511,6 +521,8 @@ def main():
                        help='Use parallel I/O processing to reduce CPU bottlenecks (recommended)')
     parser.add_argument('--profile_performance', action='store_true', 
                        help='Show detailed performance profiling information')
+    parser.add_argument('--max_workers', type=int, default=0, 
+                       help='Maximum parallel workers for I/O operations (0=auto, default: 8 for Kaggle)')
     
     args = parser.parse_args()
 
@@ -554,14 +566,17 @@ def main():
     detector = PaddleOCR(use_angle_cls=False, lang="vi", use_gpu=use_gpu)
     print(f"PaddleOCR using GPU: {use_gpu}")
     
-    # Store parallel I/O setting for process_video_folder
+    # Store parallel I/O settings for process_video_folder
     process_video_folder._parallel_io = args.parallel_io
+    process_video_folder._max_workers = args.max_workers
     
     # Print resource utilization recommendations
     print(f"\n📊 Current batch configuration:")
     print(f"   - Image batch size: {args.batch_size}")
     print(f"   - Recognition batch size: {args.recognition_batch_size}")
     print(f"   - Parallel I/O: {'Enabled' if args.parallel_io else 'Disabled'}")
+    print(f"   - Max workers: {args.max_workers if args.max_workers > 0 else 'Auto (8-12)'}")
+    print(f"   - Available CPU cores: {multiprocessing.cpu_count()}")
     print(f"   - GPU memory available: ~15GB")
     print(f"   - Performance profiling: {'Enabled' if args.profile_performance else 'Disabled'}")
     
