@@ -49,7 +49,7 @@ class BatchPredictor(Predictor):
     
     def predict_batch(self, images, batch_size=8):
         """
-        Batch prediction for multiple PIL images
+        Batch prediction for multiple PIL images using VietOCR's built-in batch processing
         Args:
             images: List of PIL Images
             batch_size: Internal batch size for processing
@@ -71,53 +71,90 @@ class BatchPredictor(Predictor):
                     results.append("")
             return results
         
+        # Use VietOCR's built-in predict_batch method if available
+        if hasattr(super(), 'predict_batch'):
+            try:
+                print(f"🚀 Using VietOCR's built-in batch processing for {len(images)} images")
+                return super().predict_batch(images)
+            except Exception as e:
+                print(f"VietOCR batch processing error: {e}, falling back to custom implementation")
+        
+        # Custom batch processing with proper tensor handling
         results = []
         
-        for i in range(0, len(images), batch_size):
-            batch_imgs = images[i:i + batch_size]
-            
+        # Group images by similar aspect ratios for better batching
+        from collections import defaultdict
+        
+        # Group images by width (after preprocessing) to avoid tensor size mismatch
+        width_groups = defaultdict(list)
+        processed_images = []
+        
+        # First pass: process all images and group by width
+        for idx, img in enumerate(images):
             try:
-                # Process PIL images using VietOCR's process_input function
-                batch_tensors = []
-                for img in batch_imgs:
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    # Use VietOCR's process_input function
-                    img_tensor = self.process_input(img, self.image_height, 
-                                                  self.image_min_width, self.image_max_width)
-                    batch_tensors.append(img_tensor)
-                
-                # Stack into batch tensor and move to device
-                if batch_tensors:
-                    batch_tensor = torch.cat(batch_tensors, dim=0).to(self.device)
-                    
-                    # Run batch inference
-                    with torch.no_grad():
-                        if self.beamsearch:
-                            # For beam search, process each image individually (beam search doesn't support batching well)
-                            for j in range(batch_tensor.size(0)):
-                                single_img = batch_tensor[j:j+1]
-                                sent = self.translate_beam_search(single_img, self.model)
-                                decoded_sent = self.vocab.decode(sent)
-                                results.append(decoded_sent)
-                        else:
-                            # For regular translation, can process in batch
-                            batch_output, batch_probs = self.translate(batch_tensor, self.model)
-                            for j in range(len(batch_output)):
-                                s = batch_output[j].tolist()
-                                decoded_sent = self.vocab.decode(s)
-                                results.append(decoded_sent)
-                        
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                # Process input to get tensor
+                img_tensor = self.process_input(img, self.image_height, 
+                                              self.image_min_width, self.image_max_width)
+                width = img_tensor.shape[-1]  # Get width dimension
+                width_groups[width].append((idx, img_tensor))
+                processed_images.append(None)  # Placeholder
             except Exception as e:
-                print(f"Batch processing error: {e}")
-                # Fallback to individual processing for this batch
-                for img in batch_imgs:
-                    try:
-                        result = self.predict(img)
-                        results.append(result)
-                    except Exception as fallback_e:
-                        print(f"Fallback error: {fallback_e}")
-                        results.append("")
+                print(f"Error processing image {idx}: {e}")
+                processed_images.append("")
+        
+        # Process each width group in batches
+        for width, img_group in width_groups.items():
+            group_indices = [item[0] for item in img_group]
+            group_tensors = [item[1] for item in img_group]
+            
+            # Process this width group in batches
+            for i in range(0, len(group_tensors), batch_size):
+                batch_tensors = group_tensors[i:i + batch_size]
+                batch_indices = group_indices[i:i + batch_size]
+                
+                try:
+                    if batch_tensors:
+                        # Now all tensors in this batch have the same width, so we can stack them
+                        batch_tensor = torch.cat(batch_tensors, dim=0).to(self.device)
+                        
+                        # Run batch inference
+                        with torch.no_grad():
+                            if self.beamsearch:
+                                # For beam search, process individually
+                                batch_results = []
+                                for j in range(batch_tensor.size(0)):
+                                    single_img = batch_tensor[j:j+1]
+                                    sent = self.translate_beam_search(single_img, self.model)
+                                    decoded_sent = self.vocab.decode(sent)
+                                    batch_results.append(decoded_sent)
+                            else:
+                                # For regular translation
+                                batch_output, _ = self.translate(batch_tensor, self.model)
+                                batch_results = []
+                                for output in batch_output:
+                                    s = output.tolist()
+                                    decoded_sent = self.vocab.decode(s)
+                                    batch_results.append(decoded_sent)
+                        
+                        # Store results in correct positions
+                        for idx, result in zip(batch_indices, batch_results):
+                            processed_images[idx] = result
+                            
+                except Exception as e:
+                    print(f"Batch processing error for width {width}: {e}")
+                    # Fallback to individual processing for this batch
+                    for idx in batch_indices:
+                        try:
+                            original_img = images[idx]
+                            result = self.predict(original_img)
+                            processed_images[idx] = result
+                        except:
+                            processed_images[idx] = ""
+        
+        # Fill any remaining None values with empty strings
+        results = [result if result is not None else "" for result in processed_images]
         
         return results
 
