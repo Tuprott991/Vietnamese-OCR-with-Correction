@@ -33,9 +33,19 @@ class BatchPredictor(Predictor):
     """
     def __init__(self, config):
         super().__init__(config)
-        # Ensure transforms are properly initialized
-        if not hasattr(self, 'transforms'):
-            print("Warning: transforms not found, using parent predict method for batch processing")
+        # Import required functions from VietOCR
+        from vietocr.vietocr.tool.translate import process_input, translate, translate_beam_search
+        self.process_input = process_input
+        self.translate = translate
+        self.translate_beam_search = translate_beam_search
+        
+        # Store image processing parameters
+        self.image_height = config['dataset']['image_height']
+        self.image_min_width = config['dataset']['image_min_width'] 
+        self.image_max_width = config['dataset']['image_max_width']
+        self.beamsearch = config['predictor']['beamsearch']
+        
+        print("✅ BatchPredictor initialized successfully with VietOCR functions")
     
     def predict_batch(self, images, batch_size=8):
         """
@@ -50,7 +60,7 @@ class BatchPredictor(Predictor):
             return []
         
         # Check if we have the necessary attributes for batch processing
-        if not hasattr(self, 'transforms') or not hasattr(self, 'model'):
+        if not hasattr(self, 'model') or not hasattr(self, 'process_input'):
             print("Missing required attributes for batch processing, falling back to sequential")
             results = []
             for img in images:
@@ -67,30 +77,36 @@ class BatchPredictor(Predictor):
             batch_imgs = images[i:i + batch_size]
             
             try:
-                # Convert PIL images to tensors
+                # Process PIL images using VietOCR's process_input function
                 batch_tensors = []
                 for img in batch_imgs:
                     if img.mode != 'RGB':
                         img = img.convert('RGB')
-                    img_tensor = self.transforms(img)
+                    # Use VietOCR's process_input function
+                    img_tensor = self.process_input(img, self.image_height, 
+                                                  self.image_min_width, self.image_max_width)
                     batch_tensors.append(img_tensor)
                 
-                # Stack into batch tensor
+                # Stack into batch tensor and move to device
                 if batch_tensors:
-                    batch_tensor = torch.stack(batch_tensors).to(self.device)
+                    batch_tensor = torch.cat(batch_tensors, dim=0).to(self.device)
                     
                     # Run batch inference
                     with torch.no_grad():
-                        batch_output = self.model(batch_tensor)
-                        
-                        # Process batch output
-                        for j in range(batch_output.size(0)):
-                            single_output = batch_output[j:j+1]  # Keep batch dimension
-                            if hasattr(self, 'beamsearch') and self.beamsearch:
-                                sent = self.translate_beam_search(single_output)[0]
-                            else:
-                                sent = self.translate(single_output)[0]
-                            results.append(sent)
+                        if self.beamsearch:
+                            # For beam search, process each image individually (beam search doesn't support batching well)
+                            for j in range(batch_tensor.size(0)):
+                                single_img = batch_tensor[j:j+1]
+                                sent = self.translate_beam_search(single_img, self.model)
+                                decoded_sent = self.vocab.decode(sent)
+                                results.append(decoded_sent)
+                        else:
+                            # For regular translation, can process in batch
+                            batch_output, batch_probs = self.translate(batch_tensor, self.model)
+                            for j in range(len(batch_output)):
+                                s = batch_output[j].tolist()
+                                decoded_sent = self.vocab.decode(s)
+                                results.append(decoded_sent)
                         
             except Exception as e:
                 print(f"Batch processing error: {e}")
